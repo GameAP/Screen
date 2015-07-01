@@ -367,7 +367,12 @@ void main(int argc, char *argv[])
 		}
 		else if (std::string(argv[i]) == "-c") {
 			// Команда
-			command = argv[i + 1];
+
+			while (i < argc - 1) {
+				command = (command == "") ? command + argv[i + 1] : command + " " + argv[i + 1];
+				i++;
+			}
+
 			i++;
 		}
 		else if (std::string(argv[i]) == "-d") {
