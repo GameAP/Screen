@@ -47,7 +47,17 @@ void show_help()
 	std::cout << "screen.exe -t kill -S hldm -c \n";
 }
 
+bool dirExists(const std::string& dirName_in)
+{
+  DWORD ftyp = GetFileAttributesA(dirName_in.c_str());
+  if (ftyp == INVALID_FILE_ATTRIBUTES)
+    return false;  //something is wrong with your path!
 
+  if (ftyp & FILE_ATTRIBUTE_DIRECTORY)
+    return true;   // this is a directory!
+
+  return false;    // this is not a directory!
+}
 
 bool IsWinNT()  //проверка запуска под NT
 {
@@ -55,6 +65,14 @@ bool IsWinNT()  //проверка запуска под NT
 	osv.dwOSVersionInfoSize = sizeof(osv);
 	GetVersionEx(&osv);
 	return (osv.dwPlatformId == VER_PLATFORM_WIN32_NT);
+}
+
+BOOL IsProcessRunning(DWORD pid)
+{
+    HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, pid);
+    DWORD ret = WaitForSingleObject(process, 0);
+    CloseHandle(process);
+    return ret == WAIT_TIMEOUT;
 }
 
 void ErrorMessage(char *str)  //вывод подробной информации об ошибке
@@ -108,8 +126,48 @@ void console_append(std::string str_in, std::string name, int pid)
 	fout.close();
 }
 
+void WriteStringToConsoleInput(HANDLE hInput, char *stringToWrie)
+{
+	char *pos, c;
+	char keyCode;
+	INPUT_RECORD ir;
+	DWORD numberOfEventsWritten;
+
+	pos = stringToWrie;
+	c = *pos;
+	while (c != 0)
+	{
+		if (c == '\n')
+			c = '\r';
+		keyCode = toupper(c);
+
+		ir.EventType = KEY_EVENT;
+		ir.Event.KeyEvent.bKeyDown = TRUE;
+		ir.Event.KeyEvent.wRepeatCount = 1;
+		ir.Event.KeyEvent.wVirtualKeyCode = keyCode;
+		ir.Event.KeyEvent.wVirtualScanCode = MapVirtualKey(keyCode, MAPVK_VK_TO_VSC);
+		ir.Event.KeyEvent.uChar.UnicodeChar = (WCHAR)c;
+		ir.Event.KeyEvent.dwControlKeyState = isupper(c) != 0 ? 0x80 : 0;
+
+		if (!WriteConsoleInput(hInput, &ir, 1u, (LPDWORD)&numberOfEventsWritten))
+			ErrorMessage("WriteConsoleInput");
+
+		ir.Event.KeyEvent.bKeyDown = FALSE;
+
+		if (!WriteConsoleInput(hInput, &ir, 1u, (LPDWORD)&numberOfEventsWritten))
+			ErrorMessage("WriteConsoleInput");
+
+		pos++;
+		c = *pos;
+	}
+}
+
 void run(std::string command, std::string sname, std::string directory)
 {
+	if (!dirExists(".db")) {
+		exec("mkdir .db");
+	}
+	
 	char buf[1024];           //буфер ввода/вывода
 
 	STARTUPINFO si;
@@ -117,6 +175,7 @@ void run(std::string command, std::string sname, std::string directory)
 	SECURITY_DESCRIPTOR sd;        //структура security для пайпов
 	PROCESS_INFORMATION pi;
 
+	HANDLE hOutput, hInput;
 	HANDLE newstdin, newstdout, read_stdout, write_stdin;  //дескрипторы пайпов
 
 	if (directory == "") {
@@ -132,6 +191,9 @@ void run(std::string command, std::string sname, std::string directory)
 	else {
 		sa.lpSecurityDescriptor = NULL;
 	}
+
+	hInput = GetStdHandle(STD_INPUT_HANDLE);
+	hOutput = GetStdHandle(STD_OUTPUT_HANDLE);
 
 	sa.nLength = sizeof(SECURITY_ATTRIBUTES);
 	sa.bInheritHandle = true;       //разрешаем наследование дескрипторов
@@ -166,10 +228,11 @@ void run(std::string command, std::string sname, std::string directory)
 	*/
 
 	si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+	//si.dwFlags = STARTF_USESTDHANDLES;
 	si.wShowWindow = SW_HIDE;
 	si.hStdOutput = newstdout;
 	si.hStdError = newstdout;   //подменяем дескрипторы для
-	si.hStdInput = newstdin;    // дочернего процесса
+	si.hStdInput = hInput;    // дочернего процесса
 
 	//const size_t cSize = strlen(command.c_str()) + 1;
 	wchar_t* szCmdline = new wchar_t[strlen(command.c_str()) + 1];
@@ -208,7 +271,10 @@ void run(std::string command, std::string sname, std::string directory)
 	std::string json_in;
 
 	FreeConsole();
+	Sleep(100);
 	AttachConsole(pi.dwProcessId);
+
+	ShowWindow(GetConsoleWindow(), SW_HIDE);
 
 	for (;;)      //основной цикл программы
 	{
@@ -241,36 +307,22 @@ void run(std::string command, std::string sname, std::string directory)
 				while (bread >= 1023)
 				{
 					ReadFile(read_stdout, buf, 1023, &bread, NULL);  //читаем из пайпа stdout
-					//printf("%s",buf);
 					console_append((const char*)buf, sname, pi.dwProcessId);
 					bzero(buf);
 				}
 			}
 			else {
 				ReadFile(read_stdout, buf, 1023, &bread, NULL);
-				console_append((const char*)buf, sname, pi.dwProcessId);
-				//printf("%s",buf);
+				console_append((const char*)buf, sname, pi.dwProcessId);;
 			}
 		}
 
 		if (jroot["command"].asString() != "") {
-			bzero(buf);
+			char *send_command = new char[jroot["command"].asString().length() + 1];
+			strcpy(send_command, jroot["command"].asCString());
 
-			std::string send_command = jroot["command"].asString();
-
-			int i = 0;
-			while (i < send_command.size()) {
-				*buf = (char)send_command[i];
-
-				WriteFile(write_stdin, buf, 1, &bread, NULL);
-				i++;
-			}
-
-			//*buf = '\r';
-			//WriteFile(write_stdin, buf, 1, &bread, NULL);
-
-			*buf = '\n';
-			WriteFile(write_stdin, buf, 1, &bread, NULL);
+			WriteStringToConsoleInput(hInput, send_command);
+			WriteStringToConsoleInput(hInput, "\n");
 
 			console_append("", sname, pi.dwProcessId);
 		}
@@ -416,6 +468,12 @@ void main(int argc, char *argv[])
 			for (std::string line; std::getline(fin, line); json_in = json_in + line);
 			jreader.parse(json_in, jroot, false);
 			fin.close();
+		}
+
+		if (!IsProcessRunning(jroot["pid"].asInt())) {
+			std::string file_name = ".db/" + sname + ".json";
+			remove(&file_name[0]);
+			exit(0);
 		}
 
 		std::cout << jroot["console"].asString() << std::endl;
